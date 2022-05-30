@@ -45,7 +45,7 @@ mod test {
     use rtnetlink::new_connection;
     use tokio::spawn;
 
-    use crate::proxy::net::routes::{del_routes_noblock, get_routes_noblock, load_routes};
+    use super::super::routes::{del_routes_noblock, get_routes_noblock, load_routes};
 
     #[ignore]
     #[tokio::test]

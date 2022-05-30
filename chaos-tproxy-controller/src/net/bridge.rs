@@ -10,8 +10,8 @@ use rtnetlink::packet::RouteMessage;
 use rtnetlink::Handle;
 use uuid::Uuid;
 
-use crate::proxy::net::iptables::clear_ebtables;
-use crate::proxy::net::routes::{del_routes_noblock, get_routes_noblock, load_routes};
+use super::iptables::clear_ebtables;
+use super::routes::{del_routes_noblock, get_routes_noblock, load_routes};
 
 #[derive(Debug, Clone)]
 pub struct NetEnv {
@@ -71,7 +71,7 @@ impl NetEnv {
         }
     }
 
-    pub fn set_ip_with_interface_name(&mut self, interface: &str) -> anyhow::Result<()> {
+    pub fn set_ip_with_interface_name(&mut self, interface: &str) -> Result<()> {
         for i in pnet::datalink::interfaces() {
             if i.name == interface {
                 self.device = i.name.clone();

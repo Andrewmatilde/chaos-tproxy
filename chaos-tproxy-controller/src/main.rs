@@ -56,14 +56,21 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let mut executors = vec![];
     if let Some(cmds) = opt.commands {
-        let exec = Executor::new(cmds, handler.net_env.netns.clone());
-        exec.exec().await;
-    }
+        for cmd in cmds {
+            let mut executor = Executor::new(cmd, handler.net_env.netns.clone());
+            executor.exec().await;
+            executors.push(executor);
+        }
+    };
 
     let mut signals = Signals::from_kinds(&[SignalKind::interrupt(), SignalKind::terminate()])?;
     signals.wait().await?;
     handler.stop().await?;
     remove_file(path)?;
+    for executor in executors {
+        executor.stop();
+    }
     Ok(())
 }

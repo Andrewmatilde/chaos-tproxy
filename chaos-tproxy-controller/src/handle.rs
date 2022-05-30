@@ -1,5 +1,4 @@
 use rtnetlink::{new_connection, Handle};
-use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 use crate::config::Config;
 use crate::net::bridge::NetEnv;
@@ -9,21 +8,15 @@ use crate::net::set_net::set_net;
 pub struct NetworkHandler {
     pub net_env: NetEnv,
     pub rtnl_handle: Handle,
-    pub sender: Option<Sender<()>>,
-    pub rx: Option<Receiver<()>>,
 }
 
 impl NetworkHandler {
     pub async fn new() -> Self {
-        let (sender, rx) = channel();
-
         let (conn, handle, _) = new_connection().unwrap();
         tokio::spawn(conn);
         Self {
             net_env: NetEnv::new(&handle).await,
             rtnl_handle: handle,
-            sender: Some(sender),
-            rx: Some(rx),
         }
     }
 

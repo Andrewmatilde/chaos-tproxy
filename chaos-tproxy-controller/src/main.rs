@@ -2,12 +2,14 @@ use std::process::exit;
 
 use chaos_tproxy_proxy::signal::Signals;
 use tokio::signal::unix::SignalKind;
+use tracing::error;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::cmd::command_line::{get_config_from_opt, Opt};
 use crate::handle::NetworkHandler;
+use crate::service::{ControllerInfo, Service};
 
 pub mod cmd;
 pub mod config;
@@ -31,10 +33,24 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = get_config_from_opt(&opt)?;
+
     let mut handler = NetworkHandler::new().await;
-    if handler.exec(cfg).await.is_err() {
+    if handler.exec(cfg.clone()).await.is_err() {
         return handler.stop().await;
     }
+
+    let service = Service::new(
+        opt.service_sock_path,
+        ControllerInfo {
+            listen_port: cfg.listen_port,
+            server_ip: handler.net_env.ip.clone(),
+        },
+    );
+    tokio::spawn(async move {
+        if let Err(e) = service.serve().await {
+            error!("serve with error:{}", e)
+        }
+    });
 
     let mut signals = Signals::from_kinds(&[SignalKind::interrupt(), SignalKind::terminate()])?;
     signals.wait().await?;

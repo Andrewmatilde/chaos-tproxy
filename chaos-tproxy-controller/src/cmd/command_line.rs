@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Result};
 use structopt::StructOpt;
 use tracing_subscriber::filter::LevelFilter;
@@ -12,6 +14,11 @@ pub struct Opt {
     /// Match if the tcp package port is one of the given ports.
     #[structopt(short = "p", long = "ports")]
     pub ports: Vec<u16>,
+
+    /// Path of unix socket file used by controller.
+    #[structopt(short, long)]
+    pub service_sock_path: Option<PathBuf>,
+
     // The number of occurrences of the `v/verbose` flag
     /// Verbose mode (-v, -vv, -vvv, etc.)
     #[structopt(short, long, parse(from_occurrences))]
@@ -34,7 +41,7 @@ impl Opt {
 
     fn checked(self) -> Result<Self> {
         if self.ports.len() > 15 {
-            return Err(anyhow!("Up to 15 ports can be specified."))
+            return Err(anyhow!("Up to 15 ports can be specified."));
         }
         Ok(self)
     }

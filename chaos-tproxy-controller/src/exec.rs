@@ -40,9 +40,11 @@ impl Executor {
                 }
             };
             select! {
-                _ = process.wait() => {}
+                _ = process.wait() => {
+                    tracing::info!("sub process:{:?} exit",process);
+                }
                 _ = rx => {
-                    tracing::info!("executor killing sub process");
+                    tracing::info!("executor killing sub process:{:?}",process);
                     let id = process.id().unwrap() as i32;
                     unsafe {
                         libc::kill(id, libc::SIGINT);

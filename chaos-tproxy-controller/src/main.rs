@@ -9,11 +9,13 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::cmd::command_line::{get_config_from_opt, Opt};
+use crate::exec::Executor;
 use crate::handle::NetworkHandler;
 use crate::service::{ControllerInfo, Service};
 
 pub mod cmd;
 pub mod config;
+pub mod exec;
 pub mod handle;
 pub mod net;
 pub mod service;
@@ -53,6 +55,11 @@ async fn main() -> anyhow::Result<()> {
             error!("serve with error:{}", e)
         }
     });
+
+    if let Some(cmds) = opt.commands {
+        let exec = Executor::new(cmds, handler.net_env.netns.clone());
+        exec.exec().await;
+    }
 
     let mut signals = Signals::from_kinds(&[SignalKind::interrupt(), SignalKind::terminate()])?;
     signals.wait().await?;

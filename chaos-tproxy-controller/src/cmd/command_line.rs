@@ -15,6 +15,10 @@ pub struct Opt {
     #[structopt(short = "p", long = "ports")]
     pub ports: Vec<u16>,
 
+    /// Controller will run ip netns exec netns_name <command> for command in commands.
+    #[structopt(short, long)]
+    pub commands: Option<Vec<String>>,
+
     /// Path of unix socket file used by controller.
     #[structopt(short, long)]
     pub service_sock_path: Option<PathBuf>,

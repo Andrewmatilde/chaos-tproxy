@@ -38,7 +38,10 @@ impl Service {
         // GET /info
         let info = warp::path("info").map(move || json_info.clone());
 
-        info!("unix socket running in {:?}",self.path.clone().into_os_string().into_string());
+        info!(
+            "unix socket running in {:?}",
+            self.path.clone().into_os_string().into_string()
+        );
 
         let routes = warp::get().and(ok.or(info));
         warp::serve(routes).run_incoming(incoming).await;

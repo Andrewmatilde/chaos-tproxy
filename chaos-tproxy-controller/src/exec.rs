@@ -53,7 +53,7 @@ impl Executor {
     }
     pub fn stop(self) {
         if self.sender.send(()).is_err() {
-            tracing::error!("stop failed");
+            tracing::error!("send stop msg failed");
         }
     }
 }

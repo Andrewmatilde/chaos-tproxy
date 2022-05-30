@@ -27,7 +27,7 @@ impl NetworkHandler {
         }
     }
 
-    pub async fn exec(&mut self, config: Config) -> anyhow::Result<()> {
+    pub async fn run(&mut self, config: Config) -> anyhow::Result<()> {
         set_net(
             &mut self.rtnl_handle,
             &self.net_env,

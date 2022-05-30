@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = get_config_from_opt(&opt)?;
 
     let mut handler = NetworkHandler::new().await;
-    if handler.exec(cfg.clone()).await.is_err() {
+    if handler.run(cfg.clone()).await.is_err() {
         return handler.stop().await;
     }
 

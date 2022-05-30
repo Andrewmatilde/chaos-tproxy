@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
+use tracing::info;
 use warp::Filter;
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize, Default)]
@@ -36,6 +37,8 @@ impl Service {
         let json_info = serde_json::to_string(&self.info)?;
         // GET /info
         let info = warp::path("info").map(move || json_info.clone());
+
+        info!("unix socket running in {:?}",self.path.clone().into_os_string().into_string());
 
         let routes = warp::get().and(ok.or(info));
         warp::serve(routes).run_incoming(incoming).await;

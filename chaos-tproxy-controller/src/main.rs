@@ -1,3 +1,4 @@
+use std::fs::remove_file;
 use std::process::exit;
 
 use chaos_tproxy_proxy::signal::Signals;
@@ -46,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
             server_ip: handler.net_env.ip.clone(),
         },
     );
+    let path = service.path.clone();
     tokio::spawn(async move {
         if let Err(e) = service.serve().await {
             error!("serve with error:{}", e)
@@ -55,5 +57,6 @@ async fn main() -> anyhow::Result<()> {
     let mut signals = Signals::from_kinds(&[SignalKind::interrupt(), SignalKind::terminate()])?;
     signals.wait().await?;
     handler.stop().await?;
+    remove_file(path)?;
     Ok(())
 }

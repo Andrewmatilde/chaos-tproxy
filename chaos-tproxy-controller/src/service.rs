@@ -26,7 +26,7 @@ impl Service {
         }
     }
 
-    pub async fn serve(self) -> Result<()> {
+    pub async fn serve(&self) -> Result<()> {
         let listener = UnixListener::bind(self.path.clone())?;
         let incoming = UnixListenerStream::new(listener);
 

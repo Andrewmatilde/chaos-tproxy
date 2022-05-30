@@ -1,5 +1,3 @@
-use std::process::Stdio;
-
 use tokio::process::Command;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
@@ -29,7 +27,7 @@ impl Executor {
         tracing::info!("try run {:?}", command);
         let rx = self.rx.take().unwrap();
         tokio::spawn(async move {
-            let mut process = match command.stdin(Stdio::piped()).spawn() {
+            let mut process = match command.spawn() {
                 Ok(process) => {
                     tracing::info!("Process is running.");
                     process

@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         ControllerInfo {
             listen_port: cfg.listen_port,
             server_ip: handler.net_env.ip.clone(),
+            netns: handler.net_env.netns.clone(),
         },
     );
     let path = service.path.clone();

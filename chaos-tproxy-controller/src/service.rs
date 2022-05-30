@@ -11,6 +11,7 @@ use warp::Filter;
 pub struct ControllerInfo {
     pub listen_port: u16,
     pub server_ip: String,
+    pub netns: String,
 }
 
 #[derive(Debug)]

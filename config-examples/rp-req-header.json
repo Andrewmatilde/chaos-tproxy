@@ -1,0 +1,20 @@
+{
+  "proxy_ports": [
+    80
+  ],
+  "rules": [
+    {
+      "target": "Request",
+      "selector": {
+        "method": "GET"
+      },
+      "actions": {
+        "replace": {
+          "headers": {
+            "Host": "8.8.8.8"
+          }
+        }
+      }
+    }
+  ]
+}

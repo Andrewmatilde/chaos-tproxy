@@ -61,6 +61,7 @@ pub enum RawTarget {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub struct RawSelector {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     /// Mathc path of `Uri` with wildcard matches.
     ///
@@ -74,32 +75,44 @@ pub struct RawSelector {
     ///                                           path
     /// ```
     /// [wildcard matches](https://www.wikiwand.com/en/Matching_wildcards)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request_headers: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_headers: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub struct RawActions {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub abort: Option<bool>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     pub delay: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub replace: Option<RawReplaceAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<RawPatchAction>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub struct RawPatchAction {
     // patch body
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<RawPatchBody>,
 
     // append queries by key-value
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub queries: Option<Vec<(String, String)>>,
 
     // append headers by key-value
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<Vec<(String, String)>>,
 }
 
@@ -118,11 +131,17 @@ pub enum RawPatchBodyContents {
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
 pub struct RawReplaceAction {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<RawReplaceBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub queries: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
 }
 

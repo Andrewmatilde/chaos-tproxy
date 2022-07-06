@@ -1,0 +1,12 @@
+proxy_ports:
+  - 80
+rules:
+  - target: Request
+    selector:
+      method: GET
+    actions:
+      replace:
+        body:
+          contents:
+            type: TEXT
+            value: ":)"

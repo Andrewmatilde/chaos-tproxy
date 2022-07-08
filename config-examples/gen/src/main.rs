@@ -9,6 +9,29 @@ fn main() {
             target: RawTarget::Request,
             selector: RawSelector {
                 port: None,
+                path: None,
+                method: Some("GET".to_string()),
+                code: None,
+                request_headers: None,
+                response_headers: None
+            },
+            actions: RawActions {
+                abort: None,
+                delay: None,
+                replace: Some(RawReplaceAction {
+                    path: None,
+                    method: Some("POST".to_string()),
+                    body: None,
+                    code: None,
+                    queries: None,
+                    headers: None
+                }),
+                patch: None
+        }
+        }, RawRule {
+            target: RawTarget::Response,
+            selector: RawSelector {
+                port: None,
                 path: Some("/example*".to_string()),
                 method: Some("GET".to_string()),
                 code: None,

@@ -130,7 +130,6 @@ impl NetEnv {
                 &self.netns,
                 arp_set(&gateway_ip_s, &gateway_mac_s, &self.bridge2),
             ),
-            ip_route_add("default", &gateway_ip_s, &self.veth4),
             ip_netns(
                 &self.netns,
                 ip_route_add("default", &gateway_ip_s, &self.bridge2),
@@ -225,6 +224,12 @@ impl NetEnv {
     pub async fn clear_bridge(&self, handle: &mut Handle) -> Result<()> {
         let restore_dns = "cp /etc/resolv.conf.bak /etc/resolv.conf";
 
+        // Save gateway info before disrupting routes. In cloud CNI environments (e.g.,
+        // VPC CNI with ucni* interfaces), the rtnetlink-based load_routes may fail to
+        // restore the default route, leaving the pod without connectivity. We use the
+        // saved gateway to ensure the default route is always restored via shell commands.
+        let saved_gateway = try_get_default_gateway().ok();
+
         let cmdvv = vec![
             ip_netns_del(&self.netns),
             ip_link_del_bridge(&self.bridge1),
@@ -251,19 +256,36 @@ impl NetEnv {
                 tracing::error!("clear routes load_routes with error {}", e);
             });
 
-        let Gateway {
-            mac_addr: gateway_mac,
-            ip_addr: gateway_ip,
-        } = try_get_default_gateway()?;
+        // Restore default route and gateway ARP. "ip route replace" is idempotent:
+        // it adds the route when missing or replaces it when present. This guarantees
+        // the pod retains connectivity after chaos recovery in cloud CNI environments
+        // where load_routes (rtnetlink replay) silently fails.
+        let gateway = match saved_gateway {
+            Some(gw) => gw,
+            None => try_get_default_gateway()?,
+        };
 
-        if gateway_mac.octets().iter().all(|&i| i == 0) {
+        if gateway.mac_addr.octets().iter().all(|&i| i == 0) {
             return Ok(());
         }
 
-        let gateway_ip = gateway_ip.to_string();
-        let gateway_mac = gateway_mac.to_string();
+        let gateway_ip = gateway.ip_addr.to_string();
+        let gateway_mac = gateway.mac_addr.to_string();
 
-        let cmdvv = vec![arp_set(&gateway_ip, &gateway_mac, self.device.as_str())];
+        let cmdvv = vec![
+            vec![
+                "ip",
+                "route",
+                "replace",
+                "default",
+                "via",
+                &gateway_ip,
+                "dev",
+                self.device.as_str(),
+                "onlink",
+            ],
+            arp_set(&gateway_ip, &gateway_mac, self.device.as_str()),
+        ];
         execute_all_with_log_error(cmdvv)?;
         Ok(())
     }

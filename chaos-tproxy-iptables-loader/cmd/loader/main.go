@@ -1,4 +1,4 @@
-// chaos-tproxy iptables-redirect loader (istio-style).
+// chaos-tproxy iptables loader, dae-style topology + iptables datapath.
 //
 // Deploy:
 //   docker run --rm --privileged \
@@ -6,9 +6,11 @@
 //              -v /path/chaos.yaml:/etc/chaos.yaml:ro \
 //              chaos-mesh/tproxy-iptables --config /etc/chaos.yaml
 //
-// We're already inside the target container's netns. We install
-// iptables NAT REDIRECT + fwmark routing inside that netns, spawn
-// chaos-tproxy-proxy in the same netns, and tear down on exit.
+// We're already inside the target container's netns. We build a sibling
+// chaosns sub-netns and a dae0/dae0peer veth, then steer inbound traffic
+// from the target netns to chaosns purely with iptables MARK + ip rule,
+// no BPF. chaos-tproxy-proxy lives inside chaosns and listens with
+// IP_TRANSPARENT; TPROXY in chaosns hands packets to it.
 package main
 
 import (
@@ -17,9 +19,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
+	vnetns "github.com/vishvananda/netns"
+
 	"github.com/chaos-mesh/chaos-tproxy/chaos-tproxy-iptables-loader/internal/config"
+	"github.com/chaos-mesh/chaos-tproxy/chaos-tproxy-iptables-loader/internal/netns"
 	"github.com/chaos-mesh/chaos-tproxy/chaos-tproxy-iptables-loader/internal/proxy"
 	"github.com/chaos-mesh/chaos-tproxy/chaos-tproxy-iptables-loader/internal/rules"
 )
@@ -47,30 +53,51 @@ func run(cfgPath, proxyBin string) error {
 		return fmt.Errorf("proxy_ports must list at least one port")
 	}
 
-	rcfg := rules.Config{
-		ProxyMark:  cfg.ProxyMark,
-		ConnMark:   0x111,
-		ListenPort: cfg.ListenPort(),
+	// 1. Build chaosns + dae0/dae0peer veth + chaosns routing.
+	ns, err := netns.Setup(cfg.IfaceWAN)
+	if err != nil {
+		return fmt.Errorf("setup chaosns: %w", err)
+	}
+	defer ns.Teardown()
+
+	// 2. Install steering rules in the target netns (current netns).
+	if err := rules.InstallTargetNs(rules.TargetNsConfig{
 		ProxyPorts: ports,
+		Dae0Index:  ns.Dae0.Attrs().Index,
+	}); err != nil {
+		return fmt.Errorf("install target-ns rules: %w", err)
 	}
+	defer rules.UninstallTargetNs()
+	fmt.Fprintln(os.Stderr, "target netns rules installed")
 
-	// Best-effort: wipe any stale rules left over from a previous run.
-	rules.Uninstall(rcfg)
-	if err := rules.Install(rcfg); err != nil {
-		return fmt.Errorf("install iptables rules: %w", err)
+	// 3. Install TPROXY rules INSIDE chaosns.
+	if err := withNetns(ns.ChaosNs, func() error {
+		return rules.InstallChaosNs(rules.ChaosNsConfig{
+			ProxyPorts: ports,
+			ListenPort: cfg.ListenPort(),
+		})
+	}); err != nil {
+		return fmt.Errorf("install chaosns rules: %w", err)
 	}
-	defer rules.Uninstall(rcfg)
-	fmt.Fprintln(os.Stderr, "iptables rules installed")
+	defer func() {
+		_ = withNetns(ns.ChaosNs, func() error {
+			rules.UninstallChaosNs()
+			return nil
+		})
+	}()
+	fmt.Fprintln(os.Stderr, "chaosns rules installed")
 
-	// Build proxy payload by forwarding the inline YAML keys + injecting
-	// proxy_mark so the proxy's onward sockets carry SO_MARK.
+	// 4. Spawn proxy inside chaosns.
 	payload := map[string]interface{}{}
 	for k, v := range cfg.Proxy {
 		payload[k] = v
 	}
-	payload["proxy_mark"] = cfg.ProxyMark
+	payload["proxy_mark"] = uint32(rules.ProxyMark)
 
-	sp := &proxy.Spawner{BinaryPath: proxyBin}
+	sp := &proxy.Spawner{
+		BinaryPath: proxyBin,
+		Netns:      ns.ChaosNs,
+	}
 	if err := sp.Start(payload); err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
@@ -91,4 +118,19 @@ func run(cfgPath, proxyBin string) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func withNetns(target vnetns.NsHandle, fn func() error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	prev, err := vnetns.Get()
+	if err != nil {
+		return err
+	}
+	defer prev.Close()
+	if err := vnetns.Set(target); err != nil {
+		return fmt.Errorf("set target ns: %w", err)
+	}
+	defer vnetns.Set(prev)
+	return fn()
 }

@@ -33,17 +33,14 @@ impl TransparentSocket {
     }
 
     pub async fn conn(&self, dist: SocketAddr) -> io::Result<TcpStream> {
+        // Fully transparent: preserve the original client's (ip, port).
+        // This works because the proxy and the upstream live in
+        // separate netns (chaosns vs target netns), so their conntrack
+        // tables are independent — using the original 5-tuple on the
+        // outbound side does not collide with the inbound 5-tuple that
+        // landed in the proxy via TPROXY.
         let socket = TransparentSocket::set_socket(self.mark)?;
-        // When operating with a proxy-mark (sidecar / co-located proxy +
-        // upstream in the same netns), reusing the client's source port
-        // would collide with the listener's accepted child socket on the
-        // exact same 5-tuple. Use ephemeral source port instead.
-        let bind_addr = if self.mark.is_some() {
-            SocketAddr::new(self.addr.ip(), 0)
-        } else {
-            self.addr
-        };
-        socket.bind(bind_addr)?;
+        socket.bind(self.addr)?;
         socket.connect(dist).await
     }
 

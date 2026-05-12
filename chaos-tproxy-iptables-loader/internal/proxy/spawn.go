@@ -11,14 +11,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
+	vnetns "github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
 
 type Spawner struct {
 	BinaryPath string
 	SocketDir  string
+	// If non-zero, fork the proxy process into this netns.
+	Netns vnetns.NsHandle
 
 	cmd      *exec.Cmd
 	sockPath string
@@ -46,9 +50,34 @@ func (s *Spawner) Start(payload map[string]interface{}) error {
 		"-vv", "--proxy", "--ipc-path="+s.sockPath)
 	s.cmd.Stdout = os.Stdout
 	s.cmd.Stderr = os.Stderr
-	if err := s.cmd.Start(); err != nil {
-		_ = ln.Close()
-		return fmt.Errorf("spawn proxy: %w", err)
+
+	if s.Netns != 0 {
+		runtime.LockOSThread()
+		prev, gerr := vnetns.Get()
+		if gerr != nil {
+			runtime.UnlockOSThread()
+			_ = ln.Close()
+			return fmt.Errorf("get netns: %w", gerr)
+		}
+		if err := vnetns.Set(s.Netns); err != nil {
+			prev.Close()
+			runtime.UnlockOSThread()
+			_ = ln.Close()
+			return fmt.Errorf("setns chaosns: %w", err)
+		}
+		startErr := s.cmd.Start()
+		_ = vnetns.Set(prev)
+		prev.Close()
+		runtime.UnlockOSThread()
+		if startErr != nil {
+			_ = ln.Close()
+			return fmt.Errorf("spawn proxy: %w", startErr)
+		}
+	} else {
+		if err := s.cmd.Start(); err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("spawn proxy: %w", err)
+		}
 	}
 
 	go s.pushConfig(payload)

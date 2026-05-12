@@ -1,263 +1,325 @@
-// Package rules installs and removes the iptables NAT REDIRECT rules
-// that pull inbound traffic into chaos-tproxy-proxy. Inspired by
-// istio/cni/pkg/iptables/iptables.go but trimmed down to the chaos-tproxy
-// use case (single target container, single proxy port, one mark).
+// Package rules installs and tears down the iptables-based traffic
+// redirection for chaos-tproxy. Uses dae's two-netns topology
+// (chaosns inside the target's netns) but replaces dae's BPF datapath
+// with iptables + policy routing.
 //
-// All rules live in custom chains (CHAOS_PRERT, CHAOS_OUTPUT) jumped to
-// from the main chains so teardown can drop our chains without touching
-// existing rules.
+// Data flow:
+//
+//   client → target eth0
+//     ↓
+//   [target netns]
+//     mangle PREROUTING: --dport 80 -j MARK --set-mark 0xCFC1
+//     ip rule fwmark 0xCFC1 lookup 100
+//     ip route default via 169.254.0.1 dev dae0 table 100
+//     ↓ packet leaves via dae0 veth into chaosns
+//
+//   [chaosns netns]
+//     (TPROXY-style: fwmark + lookup local default dev lo)
+//     iptables -t mangle PREROUTING -p tcp --dport 80
+//       -j TPROXY --on-port 58080 --tproxy-mark 0x8000000
+//     ip rule fwmark 0x8000000 lookup 2023
+//     ip route add local default dev lo table 2023
+//     ↓ kernel delivers to IP_TRANSPARENT listener on :58080
+//
+//   proxy in chaosns: accept; original 5-tuple preserved.
+//   proxy out: bind(client_ip, client_port) + connect(nginx_ip, 80)
+//   with SO_MARK=0xCFC1 so chaosns mangle exempts it.
+//   ↓ packet exits chaosns via dae0peer → dae0 → target netns
+//   ↓ target netns: routes via main table (default eth0) to docker bridge
+//   ↓ docker bridge hairpins back to same target eth0 (or directly to nginx)
+//   ↓ nginx receives with src=real client_ip.
+
 package rules
 
 import (
 	"fmt"
 	"net"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
+// Constants shared with the netns package.
 const (
-	ChainPrerouting = "CHAOS_PRERT"
-	ChainOutput     = "CHAOS_OUTPUT"
-
-	// fwmark routing table for the proxy's reply path.
-	RouteTable    = 100
-	RoutePriority = 32764
+	ProxyMark        uint32 = 0xCFC1     // proxy's own SO_MARK; identifies proxy-originated traffic
+	TproxyMark       uint32 = 0x8000000  // TPROXY mark used in chaosns (matches dae)
+	TproxyRouteTable        = 2023       // chaosns local-default routing table
+	WanRouteTable           = 100        // target netns routing table for inbound steering
+	MarkMask         uint32 = 0xFFFFFFFF
 )
 
-// PerListener carries the per-proxy-port configuration.
-type Config struct {
-	ProxyMark  uint32   // SO_MARK on proxy's onward sockets (e.g. 0xCFC1).
-	ConnMark   uint32   // Distinct value stamped into conntrack so reply
-	                    // traffic can be identified via CONNMARK restore.
-	ListenPort uint16   // chaos-tproxy-proxy listener port.
-	ProxyPorts []uint16 // ports to capture (e.g. 80).
+// TargetNsConfig is what we install in the target netns to steer
+// inbound traffic to chaosns.
+type TargetNsConfig struct {
+	ProxyPorts []uint16 // ports to capture (e.g. [80])
+	Dae0Index  int      // dae0 ifindex in target netns
 }
 
-// ConnmarkMask is the mask we use on packet-mark <-> connmark conversion.
-const ConnmarkMask = 0xFFFFFFFF
-
-func proxyMarkSpec(m uint32) string {
-	return fmt.Sprintf("0x%x/0x%x", m, ConnmarkMask)
-}
-
-// Install adds all rules. Idempotent: existing rules with the same spec
-// are skipped.
-func Install(cfg Config) error {
+// InstallTargetNs sets up traffic steering in the *current* netns
+// (must be target netns when called).
+func InstallTargetNs(cfg TargetNsConfig) error {
 	ipt, err := iptables.New()
 	if err != nil {
-		return fmt.Errorf("new iptables handle: %w", err)
+		return fmt.Errorf("new iptables: %w", err)
 	}
 
-	// Create custom chains (idempotent).
-	for _, c := range []struct{ table, chain string }{
-		{"nat", ChainPrerouting},
-		{"nat", ChainOutput},
-		{"mangle", ChainPrerouting},
-		{"mangle", ChainOutput},
-	} {
-		_ = ipt.NewChain(c.table, c.chain) // ignore "already exists"
-	}
+	// Permissive sysctls in target netns so reply traffic from chaosns
+	// (src = nginx's own IP arriving on dae0) isn't dropped as spoofed.
+	_ = setSysctl("net.ipv4.conf.all.rp_filter", "0")
+	_ = setSysctl("net.ipv4.conf.dae0.rp_filter", "0")
+	_ = setSysctl("net.ipv4.conf.eth0.rp_filter", "0")
+	_ = setSysctl("net.ipv4.conf.all.accept_local", "1")
+	_ = setSysctl("net.ipv4.conf.dae0.accept_local", "1")
+	_ = setSysctl("net.ipv4.conf.eth0.accept_local", "1")
+	_ = setSysctl("net.ipv4.ip_forward", "1")
 
-	mark := proxyMarkSpec(cfg.ProxyMark)
-	listen := strconv.Itoa(int(cfg.ListenPort))
+	// Custom chains in mangle for cleanup safety.
+	_ = ipt.NewChain("mangle", "CHAOS_PRERT")
 
-	// === nat PREROUTING: incoming client → proxy ===
-	//
-	// For each proxy_port, REDIRECT --to-ports listen_port. Skip packets
-	// already carrying our mark — required because loopback traffic
-	// passes through OUTPUT *and* PREROUTING; the proxy's onward
-	// connection to a local upstream would otherwise be re-captured on
-	// the PREROUTING side.
+	mark := fmt.Sprintf("0x%x/0x%x", TproxyMark, MarkMask)
+
+	// mangle PREROUTING: any inbound packet to a proxied port gets
+	// our mark. Skip if the packet already carries our mark (a
+	// defensive measure in case something else re-injects).
 	for _, port := range cfg.ProxyPorts {
-		if err := ipt.AppendUnique("nat", ChainPrerouting,
+		if err := ipt.AppendUnique("mangle", "CHAOS_PRERT",
 			"-p", "tcp",
 			"--dport", strconv.Itoa(int(port)),
 			"-m", "mark", "!", "--mark", mark,
-			"-j", "REDIRECT",
-			"--to-ports", listen,
+			"-j", "MARK", "--set-mark", fmt.Sprintf("0x%x", TproxyMark),
 		); err != nil {
-			return fmt.Errorf("nat %s redirect %d: %w", ChainPrerouting, port, err)
+			return fmt.Errorf("mangle CHAOS_PRERT mark: %w", err)
 		}
 	}
 
-	// === nat OUTPUT: proxy → nginx (forged source) ===
-	//
-	// Reply packets that had their mark restored from CONNMARK:
-	// let them through unchanged. This is istio's
-	//   -A ISTIO_OUTPUT -p tcp -m mark --mark 0x111/0xfff -j ACCEPT
-	connmarkSpec := fmt.Sprintf("0x%x/0x%x", cfg.ConnMark, ConnmarkMask)
-	if err := ipt.AppendUnique("nat", ChainOutput,
-		"-p", "tcp",
-		"-m", "mark", "--mark", connmarkSpec,
-		"-j", "ACCEPT",
-	); err != nil {
-		return fmt.Errorf("nat %s connmark accept: %w", ChainOutput, err)
-	}
-	// Proxy's onward connection carries SO_MARK == proxy_mark; let it through.
-	if err := ipt.AppendUnique("nat", ChainOutput,
-		"-p", "tcp",
-		"-m", "mark", "--mark", mark,
-		"-j", "ACCEPT",
-	); err != nil {
-		return fmt.Errorf("nat %s mark accept: %w", ChainOutput, err)
-	}
-	// Local app → its own proxy_port (e.g. container internal call to
-	// nginx) also gets REDIRECTed unless already marked.
-	for _, port := range cfg.ProxyPorts {
-		if err := ipt.AppendUnique("nat", ChainOutput,
-			"-p", "tcp",
-			"--dport", strconv.Itoa(int(port)),
-			"-m", "mark", "!", "--mark", mark,
-			"-j", "REDIRECT",
-			"--to-ports", listen,
-		); err != nil {
-			return fmt.Errorf("nat %s output redirect %d: %w", ChainOutput, port, err)
-		}
+	// Hook into PREROUTING.
+	if err := ipt.AppendUnique("mangle", "PREROUTING", "-j", "CHAOS_PRERT"); err != nil {
+		return fmt.Errorf("hook mangle PREROUTING: %w", err)
 	}
 
-	// === mangle: connmark propagation for reply-path fwmark routing ===
+	// Policy route: marked traffic goes to table WanRouteTable.
 	//
-	// When the proxy connects to a local upstream (e.g. nginx on 127.0.0.1
-	// or the same container's eth0 IP), the outbound SYN carries packet
-	// mark == proxy_mark and passes through mangle PREROUTING (loopback
-	// is bidirectional). We stamp the connection with a distinct
-	// CONNMARK so reply traffic (mark=0) can recover it.
+	// IMPORTANT: priority must be lower than the default `local` rule
+	// (priority 0) because dst IP is the container's own eth0 IP, which
+	// matches the `local` table and would be delivered locally before
+	// reaching our fwmark rule. We move our rule to priority 1 and
+	// (re-)insert the local rule at higher priority so it doesn't catch
+	// us first.
 	//
-	// On the reply direction, nginx emits SYN-ACK with packet mark == 0.
-	// mangle OUTPUT restores packet mark from the CONNMARK, which lets
-	// the fwmark ip-rule pull the reply back into the proxy via
-	// `local default dev lo`.
-	//
-	// Using a distinct CONNMARK value (not equal to proxy_mark) is an
-	// istio ambient trick: it lets us distinguish "first seen outbound
-	// packet" (triggers set) vs "restored reply" (triggers skip).
-	connmark := fmt.Sprintf("0x%x/0x%x", cfg.ConnMark, ConnmarkMask)
-	proxyMark := proxyMarkSpec(cfg.ProxyMark)
+	// Linux pre-installs `0: from all lookup local` automatically. To
+	// override its priority we must add a copy with a different priority
+	// and (separately) remove the priority-0 one. The kernel allows
+	// multiple rules pointing at the same table.
+	localRule := netlink.NewRule()
+	localRule.Family = unix.AF_INET
+	localRule.Table = 255 // RT_TABLE_LOCAL
+	localRule.Priority = 32765
+	_ = netlink.RuleDel(localRule)
+	if err := netlink.RuleAdd(localRule); err != nil {
+		return fmt.Errorf("re-add local rule at lower priority: %w", err)
+	}
+	// Now delete the original priority-0 local rule. After this the
+	// local table is consulted only at priority 32765, after our
+	// fwmark rule.
+	origLocal := netlink.NewRule()
+	origLocal.Family = unix.AF_INET
+	origLocal.Table = 255
+	origLocal.Priority = 0
+	_ = netlink.RuleDel(origLocal)
 
-	// mangle PREROUTING: when we see a packet bearing the proxy mark,
-	// stamp a CONNMARK. Loopback traffic traverses both OUTPUT and
-	// PREROUTING, and the SYN from proxy->nginx (co-located) passes
-	// through PREROUTING still carrying proxy_mark.
-	if err := ipt.AppendUnique("mangle", ChainPrerouting,
-		"-m", "mark", "--mark", proxyMark,
-		"-j", "CONNMARK", "--set-xmark", connmark,
-	); err != nil {
-		return fmt.Errorf("mangle %s set-xmark: %w", ChainPrerouting, err)
+	rule := netlink.NewRule()
+	rule.Family = unix.AF_INET
+	rule.Table = WanRouteTable
+	rule.Mark = int(TproxyMark)
+	rule.Mask = int(MarkMask)
+	rule.Priority = 1
+	_ = netlink.RuleDel(rule)
+	if err := netlink.RuleAdd(rule); err != nil {
+		return fmt.Errorf("ip rule fwmark in target ns: %w", err)
 	}
 
-	// mangle OUTPUT: when sending a packet whose CONNMARK matches ours,
-	// propagate it into the packet mark so fwmark routing and the
-	// outbound-ACCEPT rule below can see it.
-	if err := ipt.AppendUnique("mangle", ChainOutput,
-		"-m", "connmark", "--mark", connmark,
-		"-j", "CONNMARK", "--restore-mark",
-		"--nfmask", fmt.Sprintf("0x%x", ConnmarkMask),
-		"--ctmask", fmt.Sprintf("0x%x", ConnmarkMask),
-	); err != nil {
-		return fmt.Errorf("mangle %s restore-mark: %w", ChainOutput, err)
-	}
-
-	// === Hook our chains into the main chains ===
-	for _, h := range []struct{ table, mainChain, ourChain string }{
-		{"nat", "PREROUTING", ChainPrerouting},
-		{"nat", "OUTPUT", ChainOutput},
-		{"mangle", "PREROUTING", ChainPrerouting},
-		{"mangle", "OUTPUT", ChainOutput},
-	} {
-		if err := ipt.AppendUnique(h.table, h.mainChain, "-j", h.ourChain); err != nil {
-			return fmt.Errorf("hook %s %s -> %s: %w", h.table, h.mainChain, h.ourChain, err)
-		}
-	}
-
-	// === Routing rule + table for marked reply packets ===
-	//
-	// Reply packets restored to ConnMark via mangle OUTPUT need to be
-	// routed through the local `dev lo` entry so they land back in the
-	// proxy socket instead of being re-sent to the original source IP.
-	if err := installRouting(cfg.ConnMark); err != nil {
-		return fmt.Errorf("install routing: %w", err)
+	// Route table: marked packets go out dae0 (will arrive in chaosns
+	// via the veth peer). 169.254.0.1 is dae0peer's static-neigh gw.
+	if err := netlink.RouteReplace(&netlink.Route{
+		LinkIndex: cfg.Dae0Index,
+		Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
+		Gw:        net.ParseIP("169.254.0.1"),
+		Table:     WanRouteTable,
+	}); err != nil {
+		return fmt.Errorf("ip route default via dae0 table %d: %w", WanRouteTable, err)
 	}
 
 	return nil
 }
 
-// Uninstall removes everything Install() added. Best-effort: continues
-// past missing rules.
-func Uninstall(cfg Config) {
-	ipt, err := iptables.New()
-	if err != nil {
-		return
+func UninstallTargetNs() {
+	ipt, _ := iptables.New()
+	if ipt != nil {
+		_ = ipt.Delete("mangle", "PREROUTING", "-j", "CHAOS_PRERT")
+		_ = ipt.ClearChain("mangle", "CHAOS_PRERT")
+		_ = ipt.DeleteChain("mangle", "CHAOS_PRERT")
 	}
-	for _, h := range []struct{ table, mainChain, ourChain string }{
-		{"nat", "PREROUTING", ChainPrerouting},
-		{"nat", "OUTPUT", ChainOutput},
-		{"mangle", "PREROUTING", ChainPrerouting},
-		{"mangle", "OUTPUT", ChainOutput},
-	} {
-		_ = ipt.Delete(h.table, h.mainChain, "-j", h.ourChain)
-	}
-	for _, c := range []struct{ table, chain string }{
-		{"nat", ChainPrerouting},
-		{"nat", ChainOutput},
-		{"mangle", ChainPrerouting},
-		{"mangle", ChainOutput},
-	} {
-		_ = ipt.ClearChain(c.table, c.chain)
-		_ = ipt.DeleteChain(c.table, c.chain)
-	}
-	_ = removeRouting(cfg.ConnMark)
+	rule := netlink.NewRule()
+	rule.Family = unix.AF_INET
+	rule.Table = WanRouteTable
+	rule.Mark = int(TproxyMark)
+	rule.Mask = int(MarkMask)
+	rule.Priority = 1
+	_ = netlink.RuleDel(rule)
+
+	// Restore original local rule at priority 0.
+	localRule := netlink.NewRule()
+	localRule.Family = unix.AF_INET
+	localRule.Table = 255
+	localRule.Priority = 0
+	_ = netlink.RuleAdd(localRule)
+	// Remove our priority-32765 copy.
+	localRule.Priority = 32765
+	_ = netlink.RuleDel(localRule)
 }
 
-func installRouting(mark uint32) error {
+// ChaosNsConfig is what we install inside chaosns.
+type ChaosNsConfig struct {
+	ProxyPorts []uint16
+	ListenPort uint16 // chaos-tproxy-proxy listener port (e.g. 58080)
+}
+
+// InstallChaosNs runs INSIDE chaosns (caller must have switched into
+// chaosns). Sets up TPROXY-style packet delivery to the local listener
+// without rewriting any IP header.
+func InstallChaosNs(cfg ChaosNsConfig) error {
+	ipt, err := iptables.New()
+	if err != nil {
+		return fmt.Errorf("new iptables in chaosns: %w", err)
+	}
+
+	tproxyMarkSpec := fmt.Sprintf("0x%x/0x%x", TproxyMark, MarkMask)
+	proxyMarkSpec := fmt.Sprintf("0x%x/0x%x", ProxyMark, MarkMask)
+	listen := strconv.Itoa(int(cfg.ListenPort))
+
+	_ = ipt.NewChain("mangle", "CHAOS_PRERT")
+	_ = ipt.NewChain("mangle", "CHAOS_DIVERT")
+
+	// DIVERT chain: already-established TPROXY sockets short-circuit.
+	// (-m socket matches packets that have an existing matching socket.)
+	// Set mark and ACCEPT.
+	if err := ipt.AppendUnique("mangle", "CHAOS_DIVERT",
+		"-j", "MARK", "--set-mark", fmt.Sprintf("0x%x", TproxyMark),
+	); err != nil {
+		return fmt.Errorf("divert mark: %w", err)
+	}
+	if err := ipt.AppendUnique("mangle", "CHAOS_DIVERT",
+		"-j", "ACCEPT",
+	); err != nil {
+		return fmt.Errorf("divert accept: %w", err)
+	}
+
+	// Established sockets: divert (skip TPROXY again).
+	if err := ipt.AppendUnique("mangle", "CHAOS_PRERT",
+		"-p", "tcp",
+		"-m", "socket",
+		"-j", "CHAOS_DIVERT",
+	); err != nil {
+		return fmt.Errorf("prert socket -> divert: %w", err)
+	}
+
+	// New TCP connections to proxied ports: TPROXY to listen port,
+	// marking the packet for the local-route policy below.
+	for _, port := range cfg.ProxyPorts {
+		if err := ipt.AppendUnique("mangle", "CHAOS_PRERT",
+			"-p", "tcp",
+			"--dport", strconv.Itoa(int(port)),
+			"-j", "TPROXY",
+			"--tproxy-mark", fmt.Sprintf("0x%x/0x%x", TproxyMark, MarkMask),
+			"--on-port", listen,
+		); err != nil {
+			return fmt.Errorf("tproxy --dport %d: %w", port, err)
+		}
+	}
+
+	if err := ipt.AppendUnique("mangle", "PREROUTING", "-j", "CHAOS_PRERT"); err != nil {
+		return fmt.Errorf("hook chaosns mangle PRE: %w", err)
+	}
+
+	// Avoid the proxy's own outbound connection being re-captured by
+	// TPROXY: it carries ProxyMark; let it leave chaosns unchanged.
+	// (The mark also exempts it from the fwmark route below.)
+	_ = ipt.NewChain("mangle", "CHAOS_OUTPUT")
+	if err := ipt.AppendUnique("mangle", "CHAOS_OUTPUT",
+		"-m", "mark", "--mark", proxyMarkSpec,
+		"-j", "ACCEPT",
+	); err != nil {
+		return fmt.Errorf("output proxy-mark accept: %w", err)
+	}
+	if err := ipt.AppendUnique("mangle", "OUTPUT", "-j", "CHAOS_OUTPUT"); err != nil {
+		return fmt.Errorf("hook chaosns mangle OUTPUT: %w", err)
+	}
+
+	// fwmark routing: any packet with TPROXY mark is treated as local.
+	rule := netlink.NewRule()
+	rule.Family = unix.AF_INET
+	rule.Table = TproxyRouteTable
+	rule.Mark = int(TproxyMark)
+	rule.Mask = int(MarkMask)
+	rule.Priority = 100
+	_ = netlink.RuleDel(rule)
+	if err := netlink.RuleAdd(rule); err != nil {
+		return fmt.Errorf("ip rule fwmark in chaosns: %w", err)
+	}
+
 	lo, err := netlink.LinkByName("lo")
 	if err != nil {
-		return fmt.Errorf("lookup lo: %w", err)
+		return fmt.Errorf("look up lo in chaosns: %w", err)
 	}
-	// ip route add local 0.0.0.0/0 dev lo table 100
-	route := &netlink.Route{
+	if err := netlink.RouteReplace(&netlink.Route{
 		LinkIndex: lo.Attrs().Index,
 		Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
 		Scope:     unix.RT_SCOPE_HOST,
 		Type:      unix.RTN_LOCAL,
-		Table:     RouteTable,
+		Table:     TproxyRouteTable,
+	}); err != nil {
+		return fmt.Errorf("local default dev lo table %d: %w", TproxyRouteTable, err)
 	}
-	if err := netlink.RouteReplace(route); err != nil {
-		return fmt.Errorf("route replace local default lo table %d: %w", RouteTable, err)
-	}
-	// ip rule add fwmark <mark> lookup 100 pref 32764
-	rule := netlink.NewRule()
-	rule.Family = unix.AF_INET
-	rule.Table = RouteTable
-	rule.Mark = int(mark)
-	rule.Mask = int(mark)
-	rule.Priority = RoutePriority
-	// Best-effort: delete any pre-existing identical rule first.
-	_ = netlink.RuleDel(rule)
-	if err := netlink.RuleAdd(rule); err != nil {
-		return fmt.Errorf("rule add fwmark: %w", err)
-	}
+
+	// Permissive sysctls so non-local dst is accepted.
+	_ = setSysctl("net.ipv4.ip_forward", "1")
+	_ = setSysctl("net.ipv4.conf.all.rp_filter", "0")
+	_ = setSysctl("net.ipv4.conf.dae0peer.rp_filter", "0")
+	_ = setSysctl("net.ipv4.conf.all.accept_local", "1")
+
+	// Suppress notes about mangle PREROUTING tproxy_mark spec — the
+	// tproxy match uses `--tproxy-mark` directly above; keep this
+	// var to silence unused.
+	_ = tproxyMarkSpec
 	return nil
 }
 
-func removeRouting(mark uint32) error {
+func UninstallChaosNs() {
+	ipt, _ := iptables.New()
+	if ipt != nil {
+		_ = ipt.Delete("mangle", "PREROUTING", "-j", "CHAOS_PRERT")
+		_ = ipt.Delete("mangle", "OUTPUT", "-j", "CHAOS_OUTPUT")
+		_ = ipt.ClearChain("mangle", "CHAOS_PRERT")
+		_ = ipt.ClearChain("mangle", "CHAOS_OUTPUT")
+		_ = ipt.ClearChain("mangle", "CHAOS_DIVERT")
+		_ = ipt.DeleteChain("mangle", "CHAOS_PRERT")
+		_ = ipt.DeleteChain("mangle", "CHAOS_OUTPUT")
+		_ = ipt.DeleteChain("mangle", "CHAOS_DIVERT")
+	}
 	rule := netlink.NewRule()
 	rule.Family = unix.AF_INET
-	rule.Table = RouteTable
-	rule.Mark = int(mark)
-	rule.Mask = int(mark)
-	rule.Priority = RoutePriority
+	rule.Table = TproxyRouteTable
+	rule.Mark = int(TproxyMark)
+	rule.Mask = int(MarkMask)
+	rule.Priority = 100
 	_ = netlink.RuleDel(rule)
+}
 
-	lo, err := netlink.LinkByName("lo")
-	if err == nil {
-		_ = netlink.RouteDel(&netlink.Route{
-			LinkIndex: lo.Attrs().Index,
-			Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
-			Table:     RouteTable,
-		})
-	}
-	return nil
+func setSysctl(key, value string) error {
+	path := "/proc/sys/" + strings.ReplaceAll(key, ".", "/")
+	return os.WriteFile(path, []byte(value), 0644)
 }

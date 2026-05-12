@@ -26,6 +26,7 @@ tokio = {version = "1.36", features = ["full"]}
 wildmatch = "2.1"
 tracing = "0.1"
 tracing-subscriber = {version = "0.3", features = ["env-filter", "std"]}
+tracing-log = "0.2"
 json-patch = "0.2.6"
 async-trait = "0.1.50"
 bytes = "1.0.1"
@@ -47,8 +48,12 @@ surge-ping = "0.7.0"
 rand = "0.8.5"
 
 # Pingora — proxy framework (replaces hyper-as-server-and-client).
-pingora = { version = "0.8", default-features = false, features = ["proxy"] }
-pingora-core = { version = "0.8", default-features = false }
-pingora-proxy = { version = "0.8" }
-pingora-http = { version = "0.8" }
+# Vendored fork at third_party/pingora: adds
+# `TcpSocketOptions.ip_transparent` so the proxy listener can accept
+# redirected connections (BPF/iptables deliver SYNs with non-local
+# dst IP). Keep the patch minimal so upstream bumps are easy.
+pingora = { path = "../third_party/pingora/pingora", default-features = false, features = ["proxy"] }
+pingora-core = { path = "../third_party/pingora/pingora-core", default-features = false }
+pingora-proxy = { path = "../third_party/pingora/pingora-proxy" }
+pingora-http = { path = "../third_party/pingora/pingora-http" }
 num_cpus = "1"

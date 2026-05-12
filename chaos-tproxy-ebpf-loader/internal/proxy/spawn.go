@@ -41,6 +41,7 @@ type Spawner struct {
 	sockPath string
 	ln       *net.UnixListener
 	onFD     func(int)
+	expectFD bool
 }
 
 // Start launches the proxy child. The caller should then call
@@ -65,7 +66,11 @@ func (s *Spawner) Start(payload map[string]interface{}) error {
 	s.ln = ln
 
 	// Inject required fields into the payload before we forget.
-	payload["send_listener_fd"] = true
+	// The pingora backend does its own bind; only the hyper backend
+	// hands the listener fd back via SCM_RIGHTS.
+	backend, _ := payload["backend"].(string)
+	s.expectFD = backend != "pingora"
+	payload["send_listener_fd"] = s.expectFD
 	// proxy_ports is required to be present (may be "" if all-ports);
 	// downstream serde requires Option<String>, leave whatever user
 	// set or empty.
@@ -140,6 +145,11 @@ func (s *Spawner) pushConfig(payload pushPayload) {
 			}
 			_ = conn.CloseWrite()
 			_ = conn.Close()
+			if !s.expectFD {
+				// pingora backend manages its own listener; nothing
+				// further to exchange over UDS.
+				return
+			}
 			stage = 1
 		case 1:
 			fd, err := recvFD(conn, 5*time.Second)

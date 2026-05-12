@@ -12,6 +12,7 @@ path = "chaos-tproxy-controller/src/main.rs"
 
 [workspace]
 members = ["chaos-tproxy-controller", "chaos-tproxy-proxy", "tests"]
+exclude = ["third_party/pingora"]
 
 [dependencies]
 anyhow = "1.0"

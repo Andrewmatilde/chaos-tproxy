@@ -57,15 +57,16 @@ ENV http_proxy=$HTTP_PROXY
 ENV https_proxy=$HTTPS_PROXY
 
 RUN apt-get update && apt-get install -y \
-        build-essential gcc curl git pkg-config ca-certificates \
+        build-essential gcc curl git pkg-config ca-certificates cmake \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- --default-toolchain nightly-2021-12-23 -y
+    sh -s -- --default-toolchain none -y --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 COPY . /src
 WORKDIR /src
+# rustup auto-installs the toolchain pinned in rust-toolchain.toml.
 RUN cargo build --release --bin chaos-tproxy
 
 ############################################################

@@ -60,6 +60,11 @@ impl ProxyHttp for ChaosProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<bool> {
+        eprintln!(
+            "DBG request_filter: server_addr={:?} client_addr={:?}",
+            session.server_addr(),
+            session.client_addr()
+        );
         if ctx.target.is_none() {
             ctx.target = session.server_addr().and_then(to_std_addr);
             ctx.remote = session.client_addr().and_then(to_std_addr);
@@ -232,6 +237,11 @@ fn set_so_mark(fd: RawFd, mark: u32) -> std::io::Result<()> {
 /// Run the pingora-based proxy. Blocks the current thread — pingora's
 /// `Server::run_forever` takes over.
 pub fn run(http_config: Arc<HTTPConfig>) -> anyhow::Result<()> {
+    // Bridge `log` crate output (used by pingora internally) into our
+    // tracing subscriber. Without this pingora's info!/error! calls
+    // go to /dev/null.
+    let _ = tracing_log::LogTracer::init();
+
     let listen_port = http_config.listen_port;
     let proxy = ChaosProxy::new(http_config);
 
@@ -240,7 +250,9 @@ pub fn run(http_config: Arc<HTTPConfig>) -> anyhow::Result<()> {
     server.bootstrap();
 
     let mut svc = pingora_proxy::http_proxy_service(&server.configuration, proxy);
-    svc.add_tcp(&format!("0.0.0.0:{}", listen_port));
+    let mut sock_opts = pingora_core::listeners::TcpSocketOptions::default();
+    sock_opts.ip_transparent = Some(true);
+    svc.add_tcp_with_settings(&format!("0.0.0.0:{}", listen_port), sock_opts);
 
     server.add_service(svc);
     tracing::info!("Pingora proxy listening on 0.0.0.0:{}", listen_port);

@@ -28,6 +28,7 @@ use crate::handler::http::selector::{select_request, select_response, select_rol
 use crate::proxy::http::config::{Config, HTTPConfig};
 use crate::proxy::http::connector::HttpConnector;
 use crate::proxy::tcp::listener::TcpListener;
+use crate::proxy::tcp::orig_dst::original_dst;
 use crate::proxy::tcp::transparent_socket::TransparentSocket;
 
 /// HttpServer is the proxy service behind the iptables tproxy. It would accept the forwarded
@@ -58,7 +59,11 @@ impl HttpServer {
                 }
             }?;
             let addr_remote = stream.peer_addr()?;
-            let addr_local = stream.local_addr()?;
+            // For NAT REDIRECT deployments the original destination is recovered via
+            // SO_ORIGINAL_DST (conntrack-backed). For TPROXY deployments
+            // `local_addr()` already preserves the original dst; the helper falls
+            // back to it transparently.
+            let addr_local = original_dst(&stream)?;
             debug!(target : "Accept streaming", "remote={:?}, local={:?}",addr_remote, addr_local);
             if let Some(tls_config) = &self.config.tls_config {
                 let tls_client_config = Arc::new(tls_config.tls_client_config.clone());
@@ -278,18 +283,19 @@ impl HttpService {
         *request.uri_mut() = Uri::from_parts(parts)?;
 
         // forward HTTP/HTTPS request
+        let proxy_mark = self.config.proxy_mark;
         let rsp_fut = if let Some(tls_client_config) = &self.tls_client_config {
             let https = hyper_rustls::HttpsConnectorBuilder::new()
                 .with_tls_config((**tls_client_config).clone())
                 .https_only()
                 .enable_http1()
                 .enable_http2()
-                .wrap_connector(HttpConnector::new(self.target, self.remote));
+                .wrap_connector(HttpConnector::new_with_mark(self.target, self.remote, proxy_mark));
 
             let client: client::Client<_, hyper::Body> = client::Client::builder().build(https);
             client.request(request)
         } else {
-            let client = Client::builder().build(HttpConnector::new(self.target, self.remote));
+            let client = Client::builder().build(HttpConnector::new_with_mark(self.target, self.remote, proxy_mark));
             client.request(request)
         };
 

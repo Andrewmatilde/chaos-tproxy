@@ -31,6 +31,11 @@ pub struct RawConfig {
     pub rules: Vec<RawRule>,
     pub role: Option<Role>,
     pub tls: Option<TLSRawConfig>,
+    /// SO_MARK applied to onward sockets so external redirect rules
+    /// (iptables NAT REDIRECT, BPF TC, etc.) can recognise and skip
+    /// the proxy's own traffic. None = legacy controller path.
+    #[serde(default)]
+    pub proxy_mark: Option<u32>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -204,6 +209,7 @@ impl TryFrom<RawConfig> for Config {
                     .into_iter()
                     .map(TryInto::try_into)
                     .collect::<Result<Vec<_>, Self::Error>>()?,
+                proxy_mark: raw.proxy_mark,
             },
 
             tls_config: match raw.tls {

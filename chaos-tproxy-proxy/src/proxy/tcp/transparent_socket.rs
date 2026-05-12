@@ -9,29 +9,51 @@ use tokio::net::{TcpSocket, TcpStream};
 #[derive(Debug, Clone)]
 pub struct TransparentSocket {
     addr: SocketAddr,
+    mark: Option<u32>,
 }
 
 impl TransparentSocket {
     pub fn new(addr: SocketAddr) -> TransparentSocket {
-        Self { addr }
+        Self { addr, mark: None }
+    }
+
+    /// Create a socket generator that, in addition to IP_TRANSPARENT, also
+    /// sets SO_MARK on every outbound connection. The mark is used by the
+    /// iptables-redirect deploy path (and equally by the BPF-redirect path)
+    /// to recognise and exempt the proxy's own onward traffic so it isn't
+    /// recursively captured.
+    pub fn new_with_mark(addr: SocketAddr, mark: Option<u32>) -> TransparentSocket {
+        Self { addr, mark }
     }
 
     pub fn bind(addr: SocketAddr) -> io::Result<TcpSocket> {
-        let socket = TransparentSocket::set_socket()?;
+        let socket = TransparentSocket::set_socket(None)?;
         socket.bind(addr)?;
         Ok(socket)
     }
 
     pub async fn conn(&self, dist: SocketAddr) -> io::Result<TcpStream> {
-        let socket = TransparentSocket::set_socket()?;
-        socket.bind(self.addr)?;
+        let socket = TransparentSocket::set_socket(self.mark)?;
+        // When operating with a proxy-mark (sidecar / co-located proxy +
+        // upstream in the same netns), reusing the client's source port
+        // would collide with the listener's accepted child socket on the
+        // exact same 5-tuple. Use ephemeral source port instead.
+        let bind_addr = if self.mark.is_some() {
+            SocketAddr::new(self.addr.ip(), 0)
+        } else {
+            self.addr
+        };
+        socket.bind(bind_addr)?;
         socket.connect(dist).await
     }
 
-    fn set_socket() -> io::Result<TcpSocket> {
+    fn set_socket(mark: Option<u32>) -> io::Result<TcpSocket> {
         let socket = TcpSocket::new_v4()?;
         TransparentSocket::set_ip_transparent(&socket)?;
         socket.set_reuseaddr(true)?;
+        if let Some(m) = mark {
+            TransparentSocket::set_mark(&socket, m)?;
+        }
         Ok(socket)
     }
 
@@ -49,6 +71,24 @@ impl TransparentSocket {
                 mem::size_of_val(&enable) as libc::socklen_t,
             );
 
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        };
+        Ok(())
+    }
+
+    fn set_mark(socket: &TcpSocket, mark: u32) -> io::Result<()> {
+        unsafe {
+            let socket_fd = socket.as_raw_fd();
+            let m: libc::c_uint = mark as libc::c_uint;
+            let ret = libc::setsockopt(
+                socket_fd,
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                &m as *const _ as *const _,
+                mem::size_of_val(&m) as libc::socklen_t,
+            );
             if ret != 0 {
                 return Err(io::Error::last_os_error());
             }

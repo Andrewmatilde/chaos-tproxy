@@ -50,6 +50,7 @@ impl TryFrom<RawConfig> for Config {
                     })
                 }),
                 tls: raw.tls,
+                proxy_mark: None,
             },
         })
     }
@@ -113,7 +114,8 @@ mod tests {
                     safe_mode: false,
                     rules: vec![],
                     role: None,
-                    tls: None
+                    tls: None,
+                    proxy_mark: None,
                 }
             }
         );
@@ -142,7 +144,8 @@ mod tests {
                     safe_mode: true,
                     rules: vec![],
                     role: None,
-                    tls: None
+                    tls: None,
+                    proxy_mark: None,
                 }
             }
         );

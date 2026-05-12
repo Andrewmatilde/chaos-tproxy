@@ -14,6 +14,7 @@ pub struct HTTPConfig {
     pub listen_port: u16,
     pub rules: Vec<Rule>,
     pub role: Option<Role>,
+    pub proxy_mark: Option<u32>,
 }
 
 #[derive(Clone)]

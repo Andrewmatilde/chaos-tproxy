@@ -50,8 +50,32 @@ impl TransparentSocket {
         socket.set_reuseaddr(true)?;
         if let Some(m) = mark {
             TransparentSocket::set_mark(&socket, m)?;
+            TransparentSocket::set_bind_no_port(&socket)?;
         }
         Ok(socket)
+    }
+
+    /// IP_BIND_ADDRESS_NO_PORT (Linux 4.2+, constant 24): defer source-
+    /// port allocation until connect() so the kernel picks a port not
+    /// in TIME_WAIT for the specific 4-tuple. Without this, transparent
+    /// bind hits EADDRINUSE immediately under any non-trivial load.
+    fn set_bind_no_port(socket: &TcpSocket) -> io::Result<()> {
+        const IP_BIND_ADDRESS_NO_PORT: libc::c_int = 24;
+        unsafe {
+            let fd = socket.as_raw_fd();
+            let enable: libc::c_int = 1;
+            let ret = libc::setsockopt(
+                fd,
+                libc::SOL_IP,
+                IP_BIND_ADDRESS_NO_PORT,
+                &enable as *const _ as *const _,
+                mem::size_of_val(&enable) as libc::socklen_t,
+            );
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        };
+        Ok(())
     }
 
     /// Set IP_TRANSPARENT for use of tproxy.

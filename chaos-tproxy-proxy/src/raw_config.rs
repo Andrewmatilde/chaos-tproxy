@@ -35,6 +35,10 @@ pub struct RawConfig {
     pub proxy_mark: Option<u32>,
     #[serde(default)]
     pub send_listener_fd: bool,
+    /// Select HTTP proxy backend: `None` / `"hyper"` -> legacy hyper-based
+    /// server; `"pingora"` -> pingora ProxyHttp implementation.
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]

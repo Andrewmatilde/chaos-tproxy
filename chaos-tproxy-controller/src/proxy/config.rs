@@ -52,6 +52,7 @@ impl TryFrom<RawConfig> for Config {
                 tls: raw.tls,
                 proxy_mark: None,
                 send_listener_fd: false,
+                backend: None,
             },
         })
     }
@@ -118,6 +119,7 @@ mod tests {
                     tls: None,
                     proxy_mark: None,
                     send_listener_fd: false,
+                    backend: None,
                 }
             }
         );
@@ -149,6 +151,7 @@ mod tests {
                     tls: None,
                     proxy_mark: None,
                     send_listener_fd: false,
+                    backend: None,
                 }
             }
         );

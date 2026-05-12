@@ -22,9 +22,19 @@ pub async fn proxy_main(path: PathBuf) -> anyhow::Result<()> {
     let mut buf: Vec<u8> = vec![];
     let raw_config: RawConfig = client.read_into(&mut buf).await?;
     let send_fd = raw_config.send_listener_fd;
+    let backend = raw_config.backend.clone();
     let config: crate::proxy::http::config::Config = raw_config.try_into()?;
-    let (sender, rx) = channel();
 
+    if matches!(backend.as_deref(), Some("pingora")) {
+        tracing::info!("Using pingora backend");
+        let http_config = std::sync::Arc::new(config.http_config);
+        return tokio::task::spawn_blocking(move || {
+            crate::proxy::http::pingora_server::run(http_config)
+        })
+        .await?;
+    }
+
+    let (sender, rx) = channel();
     let mut server = HttpServer::new(config);
     let listener = server.bind_listener()?;
 

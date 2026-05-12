@@ -1,6 +1,6 @@
 [package]
 authors = ["Andrewmatilde <davis6813585853062@outlook.com>", "Hexilee <i@hexilee.me>"]
-edition = "2018"
+edition = "2021"
 name = "chaos-tproxy"
 version = "0.5.3"
 

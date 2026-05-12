@@ -1,3 +1,8 @@
 /target
 
 .idea
+
+# BPF build artifacts (regenerated in docker)
+chaos-tproxy-ebpf-loader/internal/bpfload/redirect_bpfel*.go
+chaos-tproxy-ebpf-loader/internal/bpfload/redirect_bpfel*.o
+chaos-tproxy-ebpf-loader/go.sum

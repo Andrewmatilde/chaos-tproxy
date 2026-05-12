@@ -31,6 +31,10 @@ pub struct RawConfig {
     pub rules: Vec<RawRule>,
     pub role: Option<Role>,
     pub tls: Option<TLSRawConfig>,
+    #[serde(default)]
+    pub proxy_mark: Option<u32>,
+    #[serde(default)]
+    pub send_listener_fd: bool,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize)]
@@ -204,6 +208,8 @@ impl TryFrom<RawConfig> for Config {
                     .into_iter()
                     .map(TryInto::try_into)
                     .collect::<Result<Vec<_>, Self::Error>>()?,
+                proxy_mark: raw.proxy_mark,
+                send_listener_fd: raw.send_listener_fd,
             },
 
             tls_config: match raw.tls {

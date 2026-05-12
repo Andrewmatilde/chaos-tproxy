@@ -1,5 +1,6 @@
 use std::io;
 use std::net::SocketAddr;
+use std::os::unix::io::{AsRawFd, RawFd};
 
 use tokio::net::{self, TcpStream};
 use tracing::{debug, instrument, trace};
@@ -24,6 +25,12 @@ impl TcpListener {
             listener: socket.listen(1024)?,
             tcp_nodelay: true,
         })
+    }
+
+    /// Raw fd of the underlying listening socket. Used by the eBPF
+    /// loader path to install the fd into a SOCKMAP via SCM_RIGHTS.
+    pub fn listen_fd(&self) -> RawFd {
+        self.listener.as_raw_fd()
     }
 
     /// Set the value of `TCP_NODELAY` option for accepted connections.

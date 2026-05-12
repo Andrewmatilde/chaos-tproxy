@@ -1,0 +1,14 @@
+container: target
+proxy_mark: 0xCFC1
+iface_wan: eth0
+iface_lo: lo
+
+proxy_ports: "80"
+listen_port: 58080
+safe_mode: false
+rules:
+  - target: Request
+    selector:
+      method: GET
+    actions:
+      delay: 3s

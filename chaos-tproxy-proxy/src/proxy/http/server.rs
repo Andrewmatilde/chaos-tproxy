@@ -41,9 +41,24 @@ impl HttpServer {
         Self { config }
     }
 
-    pub async fn serve(&mut self, mut rx: Receiver<()>) -> Result<()> {
+    /// Bind the IP_TRANSPARENT listener. Separated from `serve` so the
+    /// caller (e.g. the eBPF loader path in `proxy_main`) can send the
+    /// listener fd over a side channel before the accept loop starts.
+    pub fn bind_listener(&self) -> Result<TcpListener> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.config.http_config.listen_port));
-        let listener = TcpListener::bind(addr)?;
+        Ok(TcpListener::bind(addr)?)
+    }
+
+    pub async fn serve(&mut self, rx: Receiver<()>) -> Result<()> {
+        let listener = self.bind_listener()?;
+        self.serve_with_listener(listener, rx).await
+    }
+
+    pub async fn serve_with_listener(
+        &mut self,
+        listener: TcpListener,
+        mut rx: Receiver<()>,
+    ) -> Result<()> {
         tracing::info!("Proxy Listening");
         let http_config = Arc::new(self.config.http_config.clone());
         let rx_mut = &mut rx;
@@ -278,18 +293,19 @@ impl HttpService {
         *request.uri_mut() = Uri::from_parts(parts)?;
 
         // forward HTTP/HTTPS request
+        let proxy_mark = self.config.proxy_mark;
         let rsp_fut = if let Some(tls_client_config) = &self.tls_client_config {
             let https = hyper_rustls::HttpsConnectorBuilder::new()
                 .with_tls_config((**tls_client_config).clone())
                 .https_only()
                 .enable_http1()
                 .enable_http2()
-                .wrap_connector(HttpConnector::new(self.target, self.remote));
+                .wrap_connector(HttpConnector::new_with_mark(self.target, self.remote, proxy_mark));
 
             let client: client::Client<_, hyper::Body> = client::Client::builder().build(https);
             client.request(request)
         } else {
-            let client = Client::builder().build(HttpConnector::new(self.target, self.remote));
+            let client = Client::builder().build(HttpConnector::new_with_mark(self.target, self.remote, proxy_mark));
             client.request(request)
         };
 

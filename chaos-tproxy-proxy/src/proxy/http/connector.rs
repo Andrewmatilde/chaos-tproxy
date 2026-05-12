@@ -25,6 +25,13 @@ impl HttpConnector {
         }
     }
 
+    pub fn new_with_mark(dst: SocketAddr, src: SocketAddr, mark: Option<u32>) -> Self {
+        Self {
+            target: dst,
+            socket: TransparentSocket::new_with_mark(src, mark),
+        }
+    }
+
     async fn connect(self, _: Uri) -> Result<TcpStream> {
         Ok(self.socket.conn(self.target).await?)
     }

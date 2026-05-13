@@ -23,6 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pingora_core::connectors::l4::BindTo;
 use pingora_core::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
+use pingora_core::server::configuration::ServerConf;
 use pingora_core::server::Server;
 use pingora_core::services::listening::Service as ListeningService;
 use pingora_core::upstreams::peer::HttpPeer;
@@ -245,14 +246,34 @@ pub fn run(http_config: Arc<HTTPConfig>) -> anyhow::Result<()> {
     let listen_port = http_config.listen_port;
     let proxy = ChaosProxy::new(http_config);
 
-    let mut server = Server::new(None)
-        .map_err(|e| anyhow::anyhow!("pingora server init: {}", e))?;
+    // Build a multi-core ServerConf. The default `Server::new(None)`
+    // gives us threads=1, listener_tasks_per_fd=1 — single-threaded.
+    // We bump both to all cores and raise the upstream keepalive pool
+    // so wrk-style sustained load can actually reuse connections.
+    let cores = num_cpus::get().max(1);
+    let mut conf = ServerConf::default();
+    conf.threads = cores;
+    conf.listener_tasks_per_fd = cores;
+    conf.upstream_keepalive_pool_size = 1024;
+    tracing::info!(
+        "Pingora ServerConf: threads={} listener_tasks_per_fd={}",
+        cores,
+        cores
+    );
+
+    let mut server = Server::new_with_opt_and_conf(None, conf);
     server.bootstrap();
 
     let mut svc = pingora_proxy::http_proxy_service(&server.configuration, proxy);
     let mut sock_opts = pingora_core::listeners::TcpSocketOptions::default();
     sock_opts.ip_transparent = Some(true);
+    // SO_REUSEPORT so all worker threads can accept on the same port
+    // without serialising through one accept syscall.
+    sock_opts.so_reuseport = Some(true);
     svc.add_tcp_with_settings(&format!("0.0.0.0:{}", listen_port), sock_opts);
+    // Bump the number of threads pingora allocates to this specific
+    // service (overrides ServerConf.threads when set).
+    svc.threads = Some(cores);
 
     server.add_service(svc);
     tracing::info!("Pingora proxy listening on 0.0.0.0:{}", listen_port);

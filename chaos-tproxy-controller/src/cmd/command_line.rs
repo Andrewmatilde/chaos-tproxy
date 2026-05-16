@@ -26,13 +26,9 @@ pub struct Opt {
     #[structopt(short, long, parse(from_occurrences))]
     pub verbose: u8,
 
-    /// Only run the sub proxy.
+    /// Only run the sub proxy. Reads JSON config from stdin until EOF.
     #[structopt(long)]
     pub proxy: bool,
-
-    /// ipc path for sub proxy.
-    #[structopt(long)]
-    pub ipc_path: Option<PathBuf>,
 }
 
 impl Opt {

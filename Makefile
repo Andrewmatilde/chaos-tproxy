@@ -15,5 +15,5 @@ release: image
 ebpf-image:
 	DOCKER_BUILDKIT=1 docker build \
 		--build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
-		-f chaos-tproxy-ebpf-loader/Dockerfile \
+		-f Dockerfile.chaos-tproxy \
 		-t chaos-mesh/tproxy-ebpf .

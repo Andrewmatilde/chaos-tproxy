@@ -2,10 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use futures::TryStreamExt;
+use bytes::Bytes;
 use http::header::HeaderMap;
 use http::{Method, Request, Response, StatusCode, Uri};
-use hyper::Body;
 use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, instrument};
@@ -50,24 +49,17 @@ pub enum PatchBodyActionContents {
     JSON(Value),
 }
 
-async fn read_value(body: &mut Body) -> anyhow::Result<Value> {
-    let tmp = std::mem::take(body);
-    let data: Vec<u8> = tmp
-        .try_fold(vec![], |mut data, seg| {
-            data.extend(seg);
-            futures::future::ok(data)
-        })
-        .await?;
-    Ok(serde_json::from_slice(&data)?)
+fn read_value(body: &Bytes) -> anyhow::Result<Value> {
+    Ok(serde_json::from_slice(body)?)
 }
 
 /// apply_request_action would inject chaos actions into the given request.
 /// TODO(@STRRL): refactor this function, it is NOT extensible with more actions.
 #[instrument]
 pub async fn apply_request_action(
-    mut request: Request<Body>,
+    mut request: Request<Bytes>,
     actions: &Actions,
-) -> anyhow::Result<Request<Body>> {
+) -> anyhow::Result<Request<Bytes>> {
     // abort the request
     if actions.abort {
         return Err(anyhow!("Abort applied"));
@@ -89,7 +81,7 @@ pub async fn apply_request_action(
 
         if let Some(body) = &replace.body {
             // replace the request body
-            *request.body_mut() = body.contents.clone().into();
+            *request.body_mut() = Bytes::from(body.contents.clone());
             request.headers_mut().remove(http::header::CONTENT_LENGTH);
         }
 
@@ -111,10 +103,10 @@ pub async fn apply_request_action(
         // patch request body with JSON Patch
         if let Some(patch_body) = &patch.body {
             let PatchBodyActionContents::JSON(ref value) = patch_body.contents;
-            let mut data = read_value(request.body_mut()).await?;
+            let mut data = read_value(request.body())?;
             json_patch::merge(&mut data, value);
             let merged = serde_json::to_vec(&data)?;
-            *request.body_mut() = merged.into();
+            *request.body_mut() = Bytes::from(merged);
             request.headers_mut().remove(http::header::CONTENT_LENGTH);
         }
 
@@ -200,9 +192,9 @@ fn replace_queries(uri: &mut Uri, queries: Option<&HashMap<String, String>>) -> 
 /// TODO(@STRRL): refactor this function, it is NOT extensible with more actions.
 #[instrument]
 pub async fn apply_response_action(
-    mut response: Response<Body>,
+    mut response: Response<Bytes>,
     actions: &Actions,
-) -> anyhow::Result<Response<Body>> {
+) -> anyhow::Result<Response<Bytes>> {
     // abort the response
     if actions.abort {
         return Err(anyhow!("Abort applied"));
@@ -221,7 +213,7 @@ pub async fn apply_response_action(
 
         // replace the response body
         if let Some(body) = &replace.body {
-            *response.body_mut() = body.contents.clone().into();
+            *response.body_mut() = Bytes::from(body.contents.clone());
             response.headers_mut().remove(http::header::CONTENT_LENGTH);
         }
 
@@ -237,10 +229,10 @@ pub async fn apply_response_action(
         // patch response body with JSON Patch
         if let Some(patch_body) = &patch.body {
             let PatchBodyActionContents::JSON(ref value) = patch_body.contents;
-            let mut data = read_value(response.body_mut()).await?;
+            let mut data = read_value(response.body())?;
             json_patch::merge(&mut data, value);
             let merged = serde_json::to_vec(&data)?;
-            *response.body_mut() = merged.into();
+            *response.body_mut() = Bytes::from(merged);
             response.headers_mut().remove(http::header::CONTENT_LENGTH);
         }
         // patch headers

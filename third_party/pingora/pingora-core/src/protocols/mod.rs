@@ -102,6 +102,11 @@ pub trait IO:
 {
     /// helper to cast as the reference of the concrete type
     fn as_any(&self) -> &dyn Any;
+    /// Local patch: mutable downcast so callers (chaos-tproxy) can
+    /// reach into the concrete l4::Stream to borrow the inner tokio
+    /// TcpStream for `splice(2)` driven by its existing
+    /// `poll_read_ready` / `poll_write_ready`.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
     /// helper to cast back of the concrete type
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
@@ -125,6 +130,9 @@ where
     T: 'static,
 {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
     fn into_any(self: Box<Self>) -> Box<dyn Any> {

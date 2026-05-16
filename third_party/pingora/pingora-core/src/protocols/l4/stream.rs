@@ -395,6 +395,17 @@ impl Stream {
         self.stream.as_mut().expect("stream should always be set")
     }
 
+    /// Local patch: borrow the inner tokio TcpStream if this Stream
+    /// is backed by TCP. Chaos-tproxy uses this to drive non-blocking
+    /// `splice(2)` via the TcpStream's own `poll_read_ready` /
+    /// `poll_write_ready`. Returns `None` for Unix / Virtual sockets.
+    pub fn tcp_stream_mut(&mut self) -> Option<&mut TcpStream> {
+        match &mut self.stream_mut().get_mut().stream {
+            RawStream::Tcp(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// set TCP nodelay for this connection if `self` is TCP
     pub fn set_nodelay(&mut self) -> Result<()> {
         match &self.stream_mut().get_mut().stream {
@@ -469,6 +480,18 @@ impl Stream {
 
 impl From<TcpStream> for Stream {
     fn from(s: TcpStream) -> Self {
+        // Local patch: also populate SocketDigest so callers that
+        // manually construct a Stream from a TcpStream (e.g.
+        // chaos-tproxy's outbound TransparentSocket.conn) can still
+        // recover the raw fd for `splice(2)`.
+        #[cfg(unix)]
+        let socket_digest = {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+            Some(Arc::new(crate::protocols::SocketDigest::from_raw_fd(fd)))
+        };
+        #[cfg(windows)]
+        let socket_digest = None;
         Stream {
             stream: Some(BufStream::with_capacity(
                 0,
@@ -479,7 +502,7 @@ impl From<TcpStream> for Stream {
             buffer_write: true,
             established_ts: SystemTime::now(),
             proxy_digest: None,
-            socket_digest: None,
+            socket_digest,
             tracer: None,
             read_pending_time: AccumulatedDuration::new(),
             write_pending_time: AccumulatedDuration::new(),
@@ -565,9 +588,21 @@ impl Ssl for Stream {}
 impl Peek for Stream {
     async fn try_peek(&mut self, buf: &mut [u8]) -> std::io::Result<bool> {
         use tokio::io::AsyncReadExt;
-        self.read_exact(buf).await?;
-        // rewind regardless of what is read
-        self.rewind(buf);
+        // Local patch: best-effort peek. Upstream's `read_exact`
+        // deadlocks when the caller's buf is larger than the first
+        // packet's bytes — caller waits for `buf.len()` bytes, peer
+        // waits for a response before sending more (HTTP keep-alive).
+        // Read once with whatever's currently in the kernel recv
+        // buffer, rewind only those bytes. Caller must handle
+        // "fewer bytes than buf.len() were available".
+        let n = self.read(buf).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "peek: 0 bytes (peer closed)",
+            ));
+        }
+        self.rewind(&buf[..n]);
         Ok(true)
     }
 }

@@ -85,6 +85,14 @@ impl SocketDigest {
         }
     }
 
+    /// Local patch: expose the underlying raw fd so chaos-tproxy can
+    /// run `splice(2)` between inbound and upstream sockets to skip
+    /// user-space copies on large response bodies.
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.raw_fd
+    }
+
     #[cfg(windows)]
     pub fn from_raw_socket(raw_sock: std::os::windows::io::RawSocket) -> SocketDigest {
         SocketDigest {

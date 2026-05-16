@@ -1,0 +1,25 @@
+[package]
+name = "chaos-tproxy-codegen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone codegen tool — NOT a workspace member, intentionally,
+# so the chaos-tproxy-proxy build never pulls progenitor / typify /
+# their transitive dep storm. Run manually:
+#   (cd tools/codegen && cargo run --release)
+#
+# That regenerates chaos-tproxy-proxy/src/schema/openapi.rs from
+# schemas/chaos-tproxy.openapi.yaml. CI should call this then
+# `git diff --exit-code` to detect drift.
+
+[workspace]
+
+[dependencies]
+progenitor = "0.10"
+openapiv3 = "2"
+serde_yaml = "0.9"
+serde_json = "1"
+syn = { version = "2", features = ["full", "parsing"] }
+prettyplease = "0.2"
+anyhow = "1"

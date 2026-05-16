@@ -1107,6 +1107,17 @@ impl BodyWriter {
         self.body_mode = BM::ContentLength(cl, 0);
     }
 
+    /// Local patch: pretend the configured Content-Length has already
+    /// been fully written. Used by chaos-tproxy after it `splice(2)`d
+    /// the body bytes directly to the socket without going through
+    /// `write_body`. Without this `do_finish_body` returns
+    /// `PrematureBodyEnd` and the H1 session can't be reused.
+    pub fn mark_content_length_complete(&mut self) {
+        if let BM::ContentLength(total, _) = self.body_mode {
+            self.body_mode = BM::ContentLength(total, total);
+        }
+    }
+
     pub fn convert_to_close_delimited(&mut self) {
         if matches!(self.body_mode, BodyMode::UntilClose(_)) {
             // nothing to do, already in close-delimited mode

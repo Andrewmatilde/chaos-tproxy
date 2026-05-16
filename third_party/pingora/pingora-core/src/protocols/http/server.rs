@@ -227,6 +227,16 @@ impl Session {
         }
     }
 
+    /// Local patch: mark the H1 response body as fully written so the
+    /// session can finish + reuse despite never having called
+    /// `write_response_body` for the full body. Only meaningful for
+    /// H1; no-op otherwise.
+    pub fn mark_response_body_complete(&mut self) {
+        if let Self::H1(s) = self {
+            s.mark_response_body_complete();
+        }
+    }
+
     /// Finish the life of this request.
     /// For H1, if connection reuse is supported, a Some(Stream) will be returned, otherwise None.
     /// For H2, always return None because H2 stream is not reusable.
@@ -809,6 +819,15 @@ impl Session {
             Self::H2(_) => None,
             Self::Subrequest(_) => None,
             Self::Custom(_) => None,
+        }
+    }
+
+    /// Local patch: mutable borrow of the underlying H1 [Stream] for
+    /// `splice(2)`. Only meaningful for H1.
+    pub fn stream_mut(&mut self) -> Option<&mut Stream> {
+        match self {
+            Self::H1(s) => Some(s.stream_mut()),
+            _ => None,
         }
     }
 

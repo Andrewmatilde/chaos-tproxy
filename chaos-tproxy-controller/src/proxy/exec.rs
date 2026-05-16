@@ -1,29 +1,25 @@
-use std::env;
-use std::path::PathBuf;
 use std::process::Stdio;
 
 use anyhow::Error;
 use chaos_tproxy_proxy::raw_config::RawConfig as ProxyRawConfig;
 use rtnetlink::{new_connection, Handle};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::select;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 use crate::proxy::net::bridge::NetEnv;
 use crate::proxy::net::set_net::set_net;
-use crate::proxy::uds_server::UdsDataServer;
 
 #[derive(Debug, Clone)]
 pub struct ProxyOpt {
-    pub ipc_path: PathBuf,
     pub verbose: u8,
 }
 
 impl ProxyOpt {
-    pub fn new(ipc_path: PathBuf, verbose: u8) -> Self {
-        Self { ipc_path, verbose }
+    pub fn new(verbose: u8) -> Self {
+        Self { verbose }
     }
 }
 
@@ -39,11 +35,7 @@ pub struct Proxy {
 
 impl Proxy {
     pub async fn new(verbose: u8) -> Self {
-        let uds_path = env::temp_dir()
-            .join(Uuid::new_v4().to_string())
-            .with_extension("sock");
-
-        let opt = ProxyOpt::new(uds_path, verbose);
+        let opt = ProxyOpt::new(verbose);
         let (sender, rx) = channel();
 
         let (conn, handle, _) = new_connection().unwrap();
@@ -60,18 +52,7 @@ impl Proxy {
 
     pub async fn exec(&mut self, config: ProxyRawConfig) -> anyhow::Result<()> {
         tracing::info!("transferring proxy raw config {:?}", &config);
-        let uds_server = UdsDataServer::new(config.clone(), self.opt.ipc_path.clone());
-        let listener = uds_server.bind()?;
 
-        let server = uds_server;
-        tokio::spawn(async move {
-            let _ = server
-                .listen(listener)
-                .await
-                .map_err(|e| tracing::error!("{:?}", e));
-        });
-
-        let opt = self.opt.clone();
         let exe_path = match std::env::current_exe() {
             Err(e) => {
                 return Err(anyhow::anyhow!(
@@ -86,11 +67,13 @@ impl Proxy {
         set_net(
             &mut self.rtnl_handle,
             &self.net_env,
-            config.proxy_ports,
+            config.proxy_ports.clone(),
             config.listen_port,
             config.safe_mode,
         )
         .await?;
+
+        let payload = serde_json::to_vec(&config)?;
 
         let mut proxy = Command::new("ip");
         proxy
@@ -102,8 +85,7 @@ impl Proxy {
                 "-{}",
                 String::from_utf8(vec![b'v'; self.opt.verbose as usize]).unwrap()
             ))
-            .arg("--proxy")
-            .arg(format!("--ipc-path={}", opt.ipc_path.to_str().unwrap()));
+            .arg("--proxy");
 
         let rx = self.rx.take().unwrap();
         self.task = Some(tokio::spawn(async move {
@@ -117,6 +99,19 @@ impl Proxy {
                     return Err(anyhow::anyhow!("failed to exec sub proxy : {:?}", e));
                 }
             };
+
+            // Push the config and close the write end so the child's
+            // read_to_end() on stdin returns.
+            if let Some(mut child_stdin) = process.stdin.take() {
+                if let Err(e) = child_stdin.write_all(&payload).await {
+                    return Err(anyhow::anyhow!(
+                        "failed to write config to sub proxy stdin: {:?}",
+                        e
+                    ));
+                }
+                drop(child_stdin);
+            }
+
             select! {
                 _ = process.wait() => {}
                 _ = rx => {

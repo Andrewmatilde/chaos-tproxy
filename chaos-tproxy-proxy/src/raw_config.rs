@@ -3,16 +3,12 @@ use std::convert::{TryFrom, TryInto};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
-use std::{fs, io};
+use std::fs;
 
 use anyhow::{anyhow, Error};
 use http::header::{HeaderMap, HeaderName};
 use http::StatusCode;
-use rustls::OwnedTrustAnchor;
-use rustls_pemfile::{certs, rsa_private_keys};
 use serde::{Deserialize, Serialize};
-use tokio_rustls::rustls::{Certificate, PrivateKey};
-use tokio_rustls::webpki;
 use wildmatch::WildMatch;
 
 use crate::handler::http::action::{
@@ -21,22 +17,40 @@ use crate::handler::http::action::{
 };
 use crate::handler::http::rule::{Rule, Target};
 use crate::handler::http::selector::Selector;
-use crate::proxy::http::config::{Config, HTTPConfig, TLSConfig};
+use crate::proxy::config::{Config, HTTPConfig};
 
+/// Top-level config the proxy reads at startup.
+///
+/// Canonical wire format for the **proxy-relevant fields** is
+/// described by `schemas/chaos-tproxy.openapi.yaml`. That schema is
+/// the cross-language contract going forward (Go controller, future
+/// code-gen, docs).
+///
+/// The struct here additionally keeps a handful of legacy fields
+/// (`proxy_ports`, `safe_mode`, `tls`, `send_listener_fd`, `backend`)
+/// for backward compatibility with chaos-tproxy-controller, which
+/// still emits them. The proxy itself ignores all of them at
+/// runtime, so they're absent from the OpenAPI schema. Once the
+/// Rust controller is retired (Go replacement) these can be deleted.
 #[derive(Debug, Eq, PartialEq, Clone, Deserialize, Serialize, Default)]
 pub struct RawConfig {
-    pub proxy_ports: Option<String>,
     pub listen_port: u16,
-    pub safe_mode: bool,
+    #[serde(default)]
     pub rules: Vec<RawRule>,
+    #[serde(default)]
     pub role: Option<Role>,
-    pub tls: Option<TLSRawConfig>,
     #[serde(default)]
     pub proxy_mark: Option<u32>,
+
+    // -------- legacy (not in OpenAPI schema; ignored at runtime) --------
+    #[serde(default)]
+    pub proxy_ports: Option<String>,
+    #[serde(default)]
+    pub safe_mode: bool,
+    #[serde(default)]
+    pub tls: Option<TLSRawConfig>,
     #[serde(default)]
     pub send_listener_fd: bool,
-    /// Select HTTP proxy backend: `None` / `"hyper"` -> legacy hyper-based
-    /// server; `"pingora"` -> pingora ProxyHttp implementation.
     #[serde(default)]
     pub backend: Option<String>,
 }
@@ -203,6 +217,11 @@ impl TryFrom<RawConfig> for Config {
     type Error = Error;
 
     fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
+        if raw.tls.is_some() {
+            tracing::warn!(
+                "TLS config received but cleartext-only build; tls block will be ignored"
+            );
+        }
         Ok(Self {
             http_config: HTTPConfig {
                 listen_port: raw.listen_port,
@@ -213,69 +232,8 @@ impl TryFrom<RawConfig> for Config {
                     .map(TryInto::try_into)
                     .collect::<Result<Vec<_>, Self::Error>>()?,
                 proxy_mark: raw.proxy_mark,
-                send_listener_fd: raw.send_listener_fd,
-            },
-
-            tls_config: match raw.tls {
-                None => None,
-                Some(tls) => Some(tls.try_into()?),
             },
         })
-    }
-}
-
-impl TryFrom<TLSRawConfig> for TLSConfig {
-    type Error = Error;
-
-    fn try_from(raw: TLSRawConfig) -> Result<Self, Self::Error> {
-        let certs = certs(&mut &*Vec::<u8>::try_from(raw.cert_file)?)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid cert"))
-            .map(|mut certs| certs.drain(..).map(Certificate).collect())?;
-        let keys: Vec<PrivateKey> = rsa_private_keys(&mut &*Vec::<u8>::try_from(raw.key_file)?)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid key"))
-            .map(|mut keys| keys.drain(..).map(PrivateKey).collect())?;
-
-        if keys.is_empty() {
-            return Err(anyhow!("empty key"));
-        }
-        let key = keys[0].clone();
-
-        let mut root_cert_store = rustls::RootCertStore::empty();
-        if let Some(cafile) = raw.ca_file {
-            let certs = rustls_pemfile::certs(&mut &*Vec::<u8>::try_from(cafile)?)?;
-            let trust_anchors = certs.iter().map(|cert| {
-                let ta = webpki::TrustAnchor::try_from_cert_der(&cert[..]).unwrap();
-                OwnedTrustAnchor::from_subject_spki_name_constraints(
-                    ta.subject,
-                    ta.spki,
-                    ta.name_constraints,
-                )
-            });
-            root_cert_store.add_server_trust_anchors(trust_anchors);
-        } else {
-            root_cert_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(
-                |ta| {
-                    OwnedTrustAnchor::from_subject_spki_name_constraints(
-                        ta.subject,
-                        ta.spki,
-                        ta.name_constraints,
-                    )
-                },
-            ));
-        }
-
-        let tls_config = Self {
-            tls_client_config: rustls::ClientConfig::builder()
-                .with_safe_defaults()
-                .with_root_certificates(root_cert_store)
-                .with_no_client_auth(),
-            tls_server_config: rustls::ServerConfig::builder()
-                .with_safe_defaults()
-                .with_no_client_auth()
-                .with_single_cert(certs, key)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
-        };
-        Ok(tls_config)
     }
 }
 

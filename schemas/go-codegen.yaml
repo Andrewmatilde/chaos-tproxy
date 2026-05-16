@@ -1,0 +1,6 @@
+package: chaosconfig
+output: ../bench/go-chaosconfig/types.gen.go
+generate:
+  models: true
+output-options:
+  skip-prune: true

@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     if opt.proxy {
-        proxy_main(opt.ipc_path.clone().unwrap()).await?;
+        proxy_main().await?;
     }
 
     if opt.input.is_some() {

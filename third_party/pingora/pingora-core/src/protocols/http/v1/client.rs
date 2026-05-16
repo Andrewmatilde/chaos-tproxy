@@ -816,6 +816,12 @@ impl HttpSession {
         &self.underlying_stream
     }
 
+    /// Local patch: mutable borrow of the underlying [Stream]. Used
+    /// by chaos-tproxy to reach the inner TcpStream for `splice(2)`.
+    pub fn stream_mut(&mut self) -> &mut Stream {
+        &mut self.underlying_stream
+    }
+
     /// Consume `self`, the underlying [Stream] will be returned and can be used
     /// directly, for example, in the case of HTTP upgrade. It is not flushed
     /// prior to being returned.

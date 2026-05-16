@@ -2,7 +2,6 @@ use std::net::IpAddr;
 
 use http::header::HeaderMap;
 use http::{Method, Request, Response, StatusCode, Uri};
-use hyper::Body;
 use wildmatch::WildMatch;
 
 use crate::raw_config::Role;
@@ -38,7 +37,7 @@ pub fn select_role(src_ip: &IpAddr, dst_ip: &IpAddr, role: &Role) -> bool {
 }
 
 /// select_request would check the given request is matched with the given selector.
-pub fn select_request(port: u16, request: &Request<Body>, selector: &Selector) -> bool {
+pub fn select_request<B>(port: u16, request: &Request<B>, selector: &Selector) -> bool {
     selector.port.iter().all(|p| port == *p)
         && selector
             .path
@@ -53,12 +52,12 @@ pub fn select_request(port: u16, request: &Request<Body>, selector: &Selector) -
 }
 
 /// select_response would check the given request and response is matched with the given selector.
-pub fn select_response(
+pub fn select_response<B>(
     port: u16,
     uri: &Uri,
     method: &Method,
     request_headers: &HeaderMap,
-    response: &Response<Body>,
+    response: &Response<B>,
     selector: &Selector,
 ) -> bool {
     selector.port.iter().all(|p| port == *p)
@@ -83,8 +82,8 @@ pub fn select_response(
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use http::Request;
-    use hyper::Body;
 
     use crate::handler::http::selector::{select_request, Selector};
 
@@ -99,7 +98,7 @@ mod tests {
             request_headers: None,
             response_headers: None,
         };
-        let req = Request::builder().body(Body::empty()).unwrap();
+        let req = Request::builder().body(Bytes::new()).unwrap();
         assert_eq!(select_request(port, &req, &selector), true);
 
         let mut selector = Selector {
@@ -112,7 +111,7 @@ mod tests {
         };
         let req = Request::builder()
             .uri("http://www.google.com/src/")
-            .body(Body::empty())
+            .body(Bytes::new())
             .unwrap();
         assert_eq!(select_request(0, &req, &selector), false);
 

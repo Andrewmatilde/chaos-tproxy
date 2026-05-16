@@ -923,6 +923,14 @@ impl HttpSession {
         }
     }
 
+    /// Local patch: mark the response body's Content-Length as fully
+    /// written without actually writing through `write_body`. Used by
+    /// chaos-tproxy when it `splice(2)`s the body bytes around the
+    /// codec. See [`crate::protocols::http::v1::body::BodyWriter::mark_content_length_complete`].
+    pub fn mark_response_body_complete(&mut self) {
+        self.body_writer.mark_content_length_complete();
+    }
+
     /// Signal that there is no more body to write.
     /// This call will try to flush the buffer if there is any un-flushed data.
     /// For chunked encoding response, this call will also send the last chunk.
@@ -1540,6 +1548,12 @@ impl HttpSession {
     /// Get the reference of the [Stream] that this HTTP session is operating upon.
     pub fn stream(&self) -> &Stream {
         &self.underlying_stream
+    }
+
+    /// Local patch: mutable borrow of the underlying [Stream]. Used
+    /// by chaos-tproxy to reach the inner TcpStream for `splice(2)`.
+    pub fn stream_mut(&mut self) -> &mut Stream {
+        &mut self.underlying_stream
     }
 
     /// Consume `self`, the underlying stream will be returned and can be used

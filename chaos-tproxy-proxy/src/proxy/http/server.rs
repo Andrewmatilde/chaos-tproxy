@@ -41,9 +41,24 @@ impl HttpServer {
         Self { config }
     }
 
-    pub async fn serve(&mut self, mut rx: Receiver<()>) -> Result<()> {
+    /// Bind the IP_TRANSPARENT listener. Separated from `serve` so the
+    /// caller (e.g. the eBPF loader path in `proxy_main`) can send the
+    /// listener fd over a side channel before the accept loop starts.
+    pub fn bind_listener(&self) -> Result<TcpListener> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.config.http_config.listen_port));
-        let listener = TcpListener::bind(addr)?;
+        Ok(TcpListener::bind(addr)?)
+    }
+
+    pub async fn serve(&mut self, rx: Receiver<()>) -> Result<()> {
+        let listener = self.bind_listener()?;
+        self.serve_with_listener(listener, rx).await
+    }
+
+    pub async fn serve_with_listener(
+        &mut self,
+        listener: TcpListener,
+        mut rx: Receiver<()>,
+    ) -> Result<()> {
         tracing::info!("Proxy Listening");
         let http_config = Arc::new(self.config.http_config.clone());
         let rx_mut = &mut rx;
@@ -196,6 +211,19 @@ pub struct HttpService {
 
     #[derivative(Debug = "ignore")]
     tls_client_config: Option<Arc<ClientConfig>>,
+
+    // Per-inbound-connection hyper client. Sharing this across all
+    // requests on the same inbound TCP connection lets hyper reuse a
+    // single upstream TCP connection (keep-alive). Without this,
+    // every HTTP request creates a brand-new outbound TCP, which on
+    // a transparent-bind proxy hits EADDRNOTAVAIL very quickly under
+    // load (the same 5-tuple
+    // (client_ip, client_port, nginx_ip, 80) collides with the
+    // TIME_WAIT or active socket from the previous request).
+    #[derivative(Debug = "ignore")]
+    plain_client: Arc<Client<HttpConnector, Body>>,
+    #[derivative(Debug = "ignore")]
+    tls_client: Option<Arc<Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>>>,
 }
 
 impl HttpService {
@@ -205,11 +233,26 @@ impl HttpService {
         config: Arc<HTTPConfig>,
         tls_client_config: Option<Arc<ClientConfig>>,
     ) -> Self {
+        let proxy_mark = config.proxy_mark;
+        let plain_client = Arc::new(
+            Client::builder().build(HttpConnector::new_with_mark(addr_target, addr_remote, proxy_mark))
+        );
+        let tls_client = tls_client_config.as_ref().map(|tls_cfg| {
+            let https = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_tls_config((**tls_cfg).clone())
+                .https_only()
+                .enable_http1()
+                .enable_http2()
+                .wrap_connector(HttpConnector::new_with_mark(addr_target, addr_remote, proxy_mark));
+            Arc::new(client::Client::builder().build(https))
+        });
         Self {
             remote: addr_remote,
             target: addr_target,
             config,
             tls_client_config,
+            plain_client,
+            tls_client,
         }
     }
 
@@ -277,20 +320,14 @@ impl HttpService {
 
         *request.uri_mut() = Uri::from_parts(parts)?;
 
-        // forward HTTP/HTTPS request
-        let rsp_fut = if let Some(tls_client_config) = &self.tls_client_config {
-            let https = hyper_rustls::HttpsConnectorBuilder::new()
-                .with_tls_config((**tls_client_config).clone())
-                .https_only()
-                .enable_http1()
-                .enable_http2()
-                .wrap_connector(HttpConnector::new(self.target, self.remote));
-
-            let client: client::Client<_, hyper::Body> = client::Client::builder().build(https);
-            client.request(request)
+        // forward HTTP/HTTPS request — reuse the per-inbound-connection
+        // hyper Client so keep-alive across multiple requests on the
+        // same inbound TCP connection avoids creating a new upstream
+        // TCP for every request.
+        let rsp_fut = if let Some(tls_client) = &self.tls_client {
+            tls_client.request(request)
         } else {
-            let client = Client::builder().build(HttpConnector::new(self.target, self.remote));
-            client.request(request)
+            self.plain_client.request(request)
         };
 
         let mut response = match rsp_fut.await {

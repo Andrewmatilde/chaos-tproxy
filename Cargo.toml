@@ -1,6 +1,6 @@
 [package]
 authors = ["Andrewmatilde <davis6813585853062@outlook.com>", "Hexilee <i@hexilee.me>"]
-edition = "2018"
+edition = "2024"
 name = "chaos-tproxy"
 version = "0.5.3"
 
@@ -11,7 +11,7 @@ name = "chaos-tproxy"
 path = "chaos-tproxy-controller/src/main.rs"
 
 [workspace]
-members = ["chaos-tproxy-controller", "chaos-tproxy-proxy", "tests"]
+members = ["chaos-tproxy-controller", "chaos-tproxy-proxy"]
 
 [dependencies]
 anyhow = "1.0"
